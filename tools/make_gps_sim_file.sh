@@ -16,6 +16,7 @@
 #   ./tools/make_gps_sim_file.sh                        # HKIA, 300 s
 #   ./tools/make_gps_sim_file.sh -d 600 -o /media/sd/GPS/HKIA.C8
 #   ./tools/make_gps_sim_file.sh --lat 51.4706 --lon -0.4619 --alt 25 -o LHR.C8
+#   ./tools/make_gps_sim_file.sh --fetch                # real orbits, auto-downloaded
 #
 set -euo pipefail
 
@@ -34,8 +35,16 @@ OUT=""
 EPHEMERIS=""
 START_DATE=""
 RETIME=1
+FETCH=0
+USER_DATE=0
 SIM_BIN="${GPS_SDR_SIM:-}"
 WORKDIR="${TMPDIR:-/tmp}/gps-sdr-sim-build"
+CACHE_DIR="${GPS_EPH_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/portapack-gps-sim}"
+# NOAA CORS carries the IGS-merged daily broadcast ephemeris as brdc<ddd>0.<yy>n.gz,
+# openly and without a login (CDDIS needs an Earthdata account). The merged file is
+# published roughly half a day after the day it covers.
+EPH_MIRROR="${GPS_EPH_MIRROR:-https://geodesy.noaa.gov/corsdata/rinex}"
+MAX_LOOKBACK=7
 
 usage() { sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//;$d'; exit "${1:-0}"; }
 
@@ -48,8 +57,9 @@ while [ $# -gt 0 ]; do
         -s|--rate)    SAMPLE_RATE="$2"; shift 2 ;;
         -o|--out)     OUT="$2"; shift 2 ;;
         -e|--ephemeris) EPHEMERIS="$2"; shift 2 ;;
-        -t|--date)    START_DATE="$2"; shift 2 ;;
+        -t|--date)    START_DATE="$2"; USER_DATE=1; shift 2 ;;
         --no-retime)  RETIME=0; shift ;;
+        --fetch)      FETCH=1; RETIME=0; shift ;;
         -h|--help)    usage 0 ;;
         *) echo "unknown option: $1" >&2; usage 1 ;;
     esac
@@ -83,22 +93,98 @@ if [ -z "$SIM_BIN" ]; then
 fi
 echo ">> gps-sdr-sim: $SIM_BIN"
 
+[ -n "$START_DATE" ] || START_DATE="$(date -u +%Y/%m/%d,%H:%M:%S)"
+
 # --- ephemeris --------------------------------------------------------------
-# Any RINEX 2/3 GPS navigation file works. gps-sdr-sim ships a sample
-# (brdc0010.22n); combined with -T below it is retimed to the scenario start, so
-# the receiver reports a current date even though the orbits are the sample's.
-# For orbits that match the real sky, download today's broadcast ephemeris
-# (BRDC*_MN.rnx from CDDIS/IGS) and pass it with -e, plus --no-retime.
+# Any RINEX 2/3 GPS navigation file works, and the choice only affects whether the
+# simulated sky matches the real one. The signal is self-consistent either way:
+# gps-sdr-sim encodes the same ephemeris into the nav message that it used to
+# compute the pseudoranges, so the receiver always solves to the requested
+# position regardless of how stale the orbits are.
+#
+#   default      gps-sdr-sim's bundled sample, retimed to the scenario start with
+#                -T. Correct date, orbits that do not match the real sky. Works
+#                forever, needs no network.
+#   --fetch      the real merged broadcast ephemeris for the scenario day, cached
+#                under $CACHE_DIR. Real sky, but only usable for start times
+#                inside that day (see below).
+#   -e <file>    your own RINEX nav file.
+#
+# A daily file holds each satellite's ephemeris at roughly 2-hour intervals and
+# gps-sdr-sim walks forward through them mid-run (up to EPHEM_ARRAY_SIZE = 15
+# sets), but it refuses to start unless the scenario time falls within an hour of
+# one of them - about a 28-hour window per file. Outside it you get
+# "ERROR: Invalid start time" with the usable tmin/tmax printed.
+if [ "$FETCH" -eq 1 ]; then
+    command -v gunzip >/dev/null 2>&1 || { echo "error: --fetch needs gunzip" >&2; exit 1; }
+    date -u -d "2020-01-01" +%j >/dev/null 2>&1 || {
+        echo "error: --fetch needs GNU date (coreutils)" >&2; exit 1; }
+
+    mkdir -p "$CACHE_DIR"
+    [ "$USER_DATE" -eq 0 ] || START_DATE="$(date -u -d \
+        "$(printf '%s' "$START_DATE" | tr ',' ' ' | tr '/' '-')" +%Y/%m/%d,%H:%M:%S)"
+    want_day="${START_DATE%%,*}"
+    eff_day=""
+    src=""
+
+    for back in $(seq 0 "$MAX_LOOKBACK"); do
+        day="$(date -u -d "${want_day//\//-} -${back} day" +%Y-%m-%d)"
+        name="brdc$(date -u -d "$day" +%j)0.$(date -u -d "$day" +%y)n"
+
+        if [ -s "$CACHE_DIR/$name" ]; then
+            EPHEMERIS="$CACHE_DIR/$name"; eff_day="$day"; src="cached"; break
+        fi
+        if curl -fsS --retry 2 -o "$CACHE_DIR/$name.gz" \
+                "$EPH_MIRROR/$(date -u -d "$day" +%Y)/$(date -u -d "$day" +%j)/$name.gz" 2>/dev/null; then
+            gunzip -f "$CACHE_DIR/$name.gz"
+            EPHEMERIS="$CACHE_DIR/$name"; eff_day="$day"; src="downloaded"; break
+        fi
+        rm -f "$CACHE_DIR/$name.gz"
+    done
+
+    [ -n "$eff_day" ] || {
+        echo "error: no broadcast ephemeris found within $MAX_LOOKBACK days of $want_day" >&2
+        echo "       mirror: $EPH_MIRROR" >&2; exit 1; }
+    echo ">> ephemeris:   $EPHEMERIS ($src, real orbits)"
+
+    # The daily file for the current day is published incrementally, so its newest
+    # epoch usually trails real time by a couple of hours - the download can
+    # succeed and the requested start still fall past the end of it. Read the
+    # epochs out of the file rather than assuming the whole day is covered.
+    # In a RINEX 2 nav epoch line, fields 2-6 are yy mm dd hh mm; field 7 can run
+    # into a negative clock term, so seconds are taken as 00 (epochs are on the
+    # minute). Timestamps are fixed-width, so sort and string compare are safe.
+    TOCS="$(awk '/END OF HEADER/{h=1;next}
+                 h && substr($0,1,2) ~ /[0-9]/ {
+                     printf "20%02d/%02d/%02d,%02d:%02d:00\n", $2,$3,$4,$5,$6 }' \
+            "$EPHEMERIS" | sort -u)"
+    FIRST_TOC="$(printf '%s\n' "$TOCS" | head -1)"
+    LAST_TOC="$(printf '%s\n' "$TOCS" | tail -1)"
+    [ -n "$LAST_TOC" ] || {
+        echo "error: no ephemeris epochs parsed from $EPHEMERIS" >&2; exit 1; }
+    echo ">> epochs:      $FIRST_TOC .. $LAST_TOC UTC"
+
+    if [ "$USER_DATE" -eq 0 ]; then
+        # No specific time asked for, so use the freshest orbits in the file.
+        START_DATE="$LAST_TOC"
+    elif [ "$START_DATE" \> "$LAST_TOC" ]; then
+        echo ">> note:        $START_DATE is past this file's last epoch; using $LAST_TOC."
+        START_DATE="$LAST_TOC"
+    elif [ "$START_DATE" \< "$FIRST_TOC" ]; then
+        echo ">> note:        $START_DATE is before this file's first epoch; using $FIRST_TOC."
+        START_DATE="$FIRST_TOC"
+    fi
+fi
+
 if [ -z "$EPHEMERIS" ]; then
     for cand in "$WORKDIR/gps-sdr-sim/brdc0010.22n" "$(dirname "$SIM_BIN")/brdc0010.22n"; do
         [ -f "$cand" ] && { EPHEMERIS="$cand"; break; }
     done
+    [ -n "$EPHEMERIS" ] && echo ">> ephemeris:   $EPHEMERIS (bundled sample, retimed)"
 fi
 [ -n "$EPHEMERIS" ] && [ -f "$EPHEMERIS" ] || {
     echo "error: no RINEX navigation file found; pass one with -e <file>" >&2; exit 1; }
-echo ">> ephemeris:   $EPHEMERIS"
-
-[ -n "$START_DATE" ] || START_DATE="$(date -u +%Y/%m/%d,%H:%M:%S)"
+echo ">> start time:  $START_DATE UTC"
 
 # --- size sanity check ------------------------------------------------------
 BYTES=$(( DURATION * SAMPLE_RATE * 2 ))

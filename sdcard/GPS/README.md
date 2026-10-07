@@ -42,6 +42,32 @@ reference point 22°18′32″N 113°54′52″E. The matching `HKIA.C8` is ~1.5
 That script rewrites `HKIA.TXT` as well, so the pair always stays consistent. Run
 it with `--lat`/`--lon`/`--alt` for other locations, and `--help` for all options.
 
+## Which ephemeris
+
+The generator needs a RINEX navigation file. That choice does **not** affect
+positional accuracy: gps-sdr-sim encodes the same ephemeris into the simulated nav
+message that it used to compute the pseudoranges, so the solution is
+self-consistent and the receiver lands on the requested coordinates however stale
+the orbits are. It only decides whether the simulated sky matches the real one,
+which matters if the receiver cross-references a stored almanac or AGPS data.
+
+| | Orbits | Reported time | Network |
+|---|---|---|---|
+| default | sample, retimed via `-T` | now | none |
+| `--fetch` | real | ~2-3 h behind now | yes, cached |
+
+`--fetch` pulls the IGS-merged daily broadcast ephemeris from NOAA CORS
+(`brdc<ddd>0.<yy>n.gz`, open, no login) into `~/.cache/portapack-gps-sim` and
+reuses it on later runs. Override the location with `GPS_EPH_CACHE` and the mirror
+with `GPS_EPH_MIRROR`.
+
+Two things about daily files are worth knowing. gps-sdr-sim will not start unless
+the scenario time falls within an hour of one of the file's ephemeris epochs, so a
+given file covers roughly a 28-hour window and refuses anything outside it. And
+the file for the day in progress is published incrementally, so its newest epoch
+trails real time by a couple of hours. The script reads the epochs out of the file
+and picks the newest one, or clamps an explicit `-t` into range and says so.
+
 ## Notes
 
 * Size is `duration × 5.2 MB/s`. FAT32 caps a single file at 4 GiB (≈826 s); the
