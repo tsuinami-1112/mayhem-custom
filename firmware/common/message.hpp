@@ -174,6 +174,8 @@ class Message {
         RxFs4Config = 116,
         FT8Packet = 117,
         FT8RxStatus = 118,
+        GNSSSimConfig = 119,
+        GNSSSimStats = 120,
         MAX
     };
 
@@ -962,6 +964,33 @@ class TXProgressMessage : public Message {
 
     uint32_t progress = 0;
     bool done = false;
+};
+
+/* Multi-GNSS Sim: which sample format proc_mgnss_sim should unpack. The sample
+ * rate still travels in SampleRateConfigMessage; this only selects the packing.
+ * Values must match Format in tools/gnss_sim/FORMAT.md and the `format=` key of
+ * the metadata sidecar. */
+class GNSSSimConfigMessage : public Message {
+   public:
+    constexpr GNSSSimConfigMessage(uint8_t format)
+        : Message{ID::GNSSSimConfig},
+          format{format} {
+    }
+
+    uint8_t format = 0;  // 0 = C8, 1 = C2, 2 = C1
+};
+
+/* Multi-GNSS Sim: replay progress plus the number of blocks the SD card failed to
+ * supply in time. TXProgressMessage has no spare field, and widening a message
+ * every TX app receives to serve one app would be the wrong trade. */
+class GNSSSimStatsMessage : public Message {
+   public:
+    constexpr GNSSSimStatsMessage()
+        : Message{ID::GNSSSimStats} {
+    }
+
+    uint32_t bytes_read = 0;
+    uint32_t underruns = 0;
 };
 
 class AFSKRxConfigureMessage : public Message {

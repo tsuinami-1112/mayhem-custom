@@ -619,6 +619,13 @@ set(MODE_CPPSRC
 )
 DeclareTargets(PGPS gps_sim)
 
+### Multi-GNSS Simulator
+
+set(MODE_CPPSRC
+	proc_mgnss_sim.cpp
+)
+DeclareTargets(PMGS mgnss_sim)
+
 ### Spectrum painter
 
 set(MODE_CPPSRC
