@@ -108,12 +108,16 @@ check("the metric ordering tracks elevation (Spearman > 0.5)", rho > 0.5,
 
 # And the loudest satellite really is the highest one, which is the single most
 # falsifiable prediction in the ground truth.
-top_metric = max(hit, key=lambda p: metric[p])
-top_elev = max(hit, key=lambda p: EXPECTED[p])
-check("the strongest detection is the highest satellite",
-      top_metric == top_elev,
-      f"strongest PRN {top_metric}, highest PRN {top_elev} "
-      f"({EXPECTED[top_elev]:.1f} deg)")
+if hit:
+    top_metric = max(hit, key=lambda p: metric[p])
+    top_elev = max(hit, key=lambda p: EXPECTED[p])
+    check("the strongest detection is the highest satellite",
+          top_metric == top_elev,
+          f"strongest PRN {top_metric}, highest PRN {top_elev} "
+          f"({EXPECTED[top_elev]:.1f} deg)")
+else:
+    check("the strongest detection is the highest satellite", False,
+          "nothing detected")
 
 # Internal consistency, using no ground truth at all: carrier Doppler and code
 # rate come from the same satellite motion, so a satellite seen at Doppler f_d
@@ -125,14 +129,23 @@ check("the strongest detection is the highest satellite",
 GAP_S = 2.5
 print(f"\nRe-acquiring the same PRNs {GAP_S} s later, to check that code phase")
 print("drifts by what the measured Doppler predicts")
-iq2 = acquire_e1.read_i16(path, samples=(PERIODS + 1) * spc,
-                          offset_samples=int(GAP_S * FS))
-res2 = acquire_e1.acquire(iq2, FS, prns=found, periods=PERIODS, threshold=0.0)
-later = {prn: (f, ph) for prn, f, ph, _ in res2}
+# A file shorter than GAP_S + the integration window cannot support this, and a
+# file with nothing in it leaves `found` empty. Both should read as a FAIL in the
+# summary rather than a traceback, since a broken file is exactly what this test
+# exists to report on.
+later = {}
+try:
+    iq2 = acquire_e1.read_i16(path, samples=(PERIODS + 1) * spc,
+                              offset_samples=int(GAP_S * FS))
+    res2 = acquire_e1.acquire(iq2, FS, prns=found, periods=PERIODS, threshold=0.0)
+    later = {prn: (f, ph) for prn, f, ph, _ in res2}
+except Exception as exc:
+    check(f"file holds the {GAP_S} s of extra signal needed to re-acquire",
+          False, f"{type(exc).__name__}: {exc}")
 
 print(f"  {'PRN':>4} {'doppler':>9} {'predicted':>10} {'observed':>9} {'error':>7}")
 drift_err = []
-for prn in sorted(found):
+for prn in sorted(set(found) & set(later)):
     f, ph0 = info[prn]
     f2, ph1 = later[prn]
     predicted = -(f / acquire_e1.CARRIER_FREQ) * FS * GAP_S
@@ -142,10 +155,13 @@ for prn in sorted(found):
           f"{observed - predicted:>+7.2f}")
 
 check("Doppler unchanged over the gap for every PRN",
-      all(abs(later[p][0] - info[p][0]) <= FS / (2 * spc) for p in found),
-      "within one 125 Hz bin")
+      bool(later) and all(abs(later[p][0] - info[p][0]) <= FS / (2 * spc)
+                          for p in later),
+      "within one 125 Hz bin" if later else "nothing re-acquired")
 check("code-phase drift matches the measured Doppler to within 1.5 samples",
-      max(drift_err) < 1.5, f"worst error {max(drift_err):.2f} samples")
+      bool(drift_err) and max(drift_err) < 1.5,
+      f"worst error {max(drift_err):.2f} samples" if drift_err
+      else "no satellites to re-acquire")
 
 print()
 if FAILURES:
