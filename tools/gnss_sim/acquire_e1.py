@@ -53,6 +53,7 @@ except ImportError:  # pragma: no cover
     def _IFFT(a, axis=-1):
         return np.fft.ifft(a, axis=axis)
 
+CARRIER_FREQ = 1575.42e6     # Hz, Galileo E1 centre
 CHIP_RATE = 1.023e6          # chips/s
 CODE_LENGTH = 4092           # chips per primary code period
 CODE_PERIOD = 0.004          # s  (= CODE_LENGTH / CHIP_RATE)
@@ -201,6 +202,31 @@ def read_i16(path, samples=None, offset_samples=0):
     return (raw[0::2].astype(np.float32) + 1j * raw[1::2].astype(np.float32))
 
 
+def read_samples(path, fmt, samples, offset_samples):
+    """Read `samples` complex samples, picking the right width for the file.
+
+    Worth having explicitly: pointing this at a .C8 while reading int16 pairs
+    adjacent I and Q bytes into one value, which produces a clean-looking null
+    result -- every PRN at the noise floor, expected and absent alike -- that
+    reads exactly like the signal being absent.
+    """
+    import os
+
+    if fmt == "auto":
+        ext = os.path.splitext(path)[1].upper()
+        if ext in (".C2", ".C1"):
+            raise SystemExit(
+                f"{path}: {ext} is a packed format and cannot be correlated "
+                "directly; unpack it first with pack.unpack(data, fmt)")
+        fmt = "c8" if ext == ".C8" else "i16"
+
+    if fmt == "c8":
+        raw = np.fromfile(path, dtype=np.int8, count=2 * samples,
+                          offset=2 * offset_samples)
+        return raw[0::2].astype(np.float32) + 1j * raw[1::2].astype(np.float32)
+    return read_i16(path, samples=samples, offset_samples=offset_samples)
+
+
 def main():  # pragma: no cover
     import argparse
     import time
@@ -213,13 +239,16 @@ def main():  # pragma: no cover
     p.add_argument("--threshold", type=float, default=8.0)
     p.add_argument("--skip-ms", type=float, default=0.0)
     p.add_argument("--no-half-sample", action="store_true")
+    p.add_argument("--format", default="auto", choices=("auto", "i16", "c8"),
+                   help="sample width; auto reads .C8 as int8 and anything else "
+                        "as the int16 the generators emit")
     a = p.parse_args()
 
     prns = ([int(x) for x in a.prns.split(",")] if a.prns
             else range(1, NUM_PRNS + 1))
     spc = int(round(a.fs * CODE_PERIOD))
-    iq = read_i16(a.path, samples=(a.periods + 1) * spc,
-                  offset_samples=int(a.skip_ms * 1e-3 * a.fs))
+    iq = read_samples(a.path, a.format, (a.periods + 1) * spc,
+                      int(a.skip_ms * 1e-3 * a.fs))
     t0 = time.time()
     found = acquire(iq, a.fs, prns=prns, periods=a.periods,
                     threshold=a.threshold, half_sample=not a.no_half_sample)
