@@ -79,7 +79,7 @@ void set_sstvrx_data(const uint8_t code);
 void set_sstvrx_phase_slant(const int16_t phase, const int16_t slant);
 void set_audiotx_config(const uint32_t divider, const float deviation_hz, const float audio_gain, uint8_t audio_shift_bits_s16, uint8_t bits_per_sample, const uint32_t tone_key_delta, const bool am_enabled, const bool dsb_enabled, const bool usb_enabled, const bool lsb_enabled);
 void set_fifo_data(const int8_t* data);
-void set_gnss_sim_format(const uint8_t format);
+void set_gnss_sim_format(const uint8_t format, const uint32_t sample_rate);
 void set_pitch_rssi(int32_t avg, bool enabled);
 void set_afsk_data(const uint32_t afsk_samples_per_bit, const uint32_t afsk_phase_inc_mark, const uint32_t afsk_phase_inc_space, const uint8_t afsk_repeat, const uint32_t afsk_bw, const uint8_t symbol_count);
 void kill_afsk();

@@ -100,13 +100,16 @@ void MultiGnssSimView::read_sim_metadata(const fs::path& metadata_path) {
         } else if (key == "start_time"sv) {
             // "YYYY/MM/DD,hh:mm:ss"
             auto parts = split_string(value, ',');
-            if (parts.size() == 2 && parts[1].size() >= 8) {
+            if (parts.size() == 2 && parts[1].size() >= 8 &&
+                parts[1][2] == ':' && parts[1][5] == ':') {
                 uint32_t hh = 0;
                 uint32_t mm = 0;
                 uint32_t ss = 0;
-                if (parse_int(parts[1].substr(0, 2), hh) &&
-                    parse_int(parts[1].substr(3, 2), mm) &&
-                    parse_int(parts[1].substr(6, 2), ss)) {
+                /* Range-checked so a malformed sidecar cannot push the clock
+                 * past a day and make the "+1d" marker appear spuriously. */
+                if (parse_int(parts[1].substr(0, 2), hh) && hh < 24 &&
+                    parse_int(parts[1].substr(3, 2), mm) && mm < 60 &&
+                    parse_int(parts[1].substr(6, 2), ss) && ss < 60) {
                     start_date = std::string{parts[0]};
                     start_seconds = (hh * 3600) + (mm * 60) + ss;
                     have_start_time = true;
@@ -134,6 +137,25 @@ void MultiGnssSimView::on_file_changed(const fs::path& new_file_path) {
     auto metadata_path = get_metadata_path(file_path);
     read_sim_metadata(metadata_path);
 
+    /* The extension and the sidecar's format= have to agree. They are set
+     * together by the generator, but a hand-edited sidecar that disagrees would
+     * unpack the bytes the wrong way and transmit noise, which is worth an error
+     * rather than a confusing bench session. */
+    uint8_t format_from_extension = 0;
+    const auto extension = file_path.extension();
+    if (path_iequal(extension, u".C1"))
+        format_from_extension = 2;
+    else if (path_iequal(extension, u".C2"))
+        format_from_extension = 1;
+    else if (!path_iequal(extension, u".C8")) {
+        nav_.display_modal("Error", "Not a GNSS sim file.");
+        return;
+    }
+    if (sim_format != format_from_extension) {
+        nav_.display_modal("Error", "format= in the .TXT does\nnot match the extension.");
+        return;
+    }
+
     auto metadata = read_metadata_file(metadata_path);
     if (metadata) {
         field_frequency.set_value(metadata->center_frequency);
@@ -141,7 +163,7 @@ void MultiGnssSimView::on_file_changed(const fs::path& new_file_path) {
     }
     sample_rate = transmitter_model.sampling_rate();
 
-    baseband::set_gnss_sim_format(sim_format);
+    baseband::set_gnss_sim_format(sim_format, sample_rate);
 
     static constexpr const char* format_names[3] = {"C8", "C2", "C1"};
     const char* format_name = format_names[sim_format < 3 ? sim_format : 0];
@@ -170,7 +192,11 @@ void MultiGnssSimView::on_file_changed(const fs::path& new_file_path) {
     }
 
     shown_second = UINT32_MAX;
-    update_time(0);
+    shown_underruns = 0;
+    if (have_start_time)
+        update_time(0);
+    else
+        text_time.set("TIME  -");
     text_drops.set("DROPS 0");
 
     // TODO: fix in UI framework with 'try_focus()'?
@@ -182,11 +208,12 @@ void MultiGnssSimView::on_file_changed(const fs::path& new_file_path) {
 /* The time a receiver should be reporting: the instant baked into the file plus
  * how far playback has got. Seeing it on the device turns a mismatch into
  * something you notice in seconds rather than something you deduce. */
-void MultiGnssSimView::update_time(uint32_t bytes_read) {
-    if (!have_start_time) {
-        text_time.set("TIME  -");
+void MultiGnssSimView::update_time(uint64_t bytes_read) {
+    /* Without a start_time there is nothing to count from. The dash is written
+     * once, by on_file_changed, so this returns rather than rebuilding the same
+     * string on every stats message. */
+    if (!have_start_time)
         return;
-    }
 
     const uint32_t elapsed = sample_rate
                                  ? static_cast<uint32_t>(samples_from_bytes(bytes_read) / sample_rate)
@@ -211,10 +238,16 @@ void MultiGnssSimView::update_time(uint32_t bytes_read) {
     text_time.set(s);
 }
 
-void MultiGnssSimView::on_stats(uint32_t bytes_read, uint32_t underruns) {
+void MultiGnssSimView::on_stats(uint64_t bytes_read, uint32_t underruns) {
     progressbar.set_value(bytes_read >> 10);
     update_time(bytes_read);
-    text_drops.set("DROPS " + to_string_dec_uint(underruns));
+
+    /* Only on a change: Text::set copies and marks the widget dirty every time,
+     * and these messages arrive 50 times a second. */
+    if (underruns != shown_underruns) {
+        shown_underruns = underruns;
+        text_drops.set("DROPS " + to_string_dec_uint(underruns));
+    }
 }
 
 void MultiGnssSimView::focus() {
@@ -253,10 +286,12 @@ void MultiGnssSimView::start() {
     if (reader) {
         button_play.set_bitmap(&bitmap_stop);
 
-        /* Resent on every pass: the underrun count resets with it, so what is on
-         * screen describes the pass you are watching. */
-        baseband::set_gnss_sim_format(sim_format);
+        /* Resent on every pass so a format or rate change cannot be missed. The
+         * underrun count is reset separately, by the ReplayConfig message the
+         * replay thread sends as it starts. */
+        baseband::set_gnss_sim_format(sim_format, sample_rate);
         shown_second = UINT32_MAX;
+        shown_underruns = UINT32_MAX;
 
         replay_thread = std::make_unique<ReplayThread>(
             std::move(reader),
@@ -337,6 +372,21 @@ MultiGnssSimView::MultiGnssSimView(
             on_file_changed(new_file_path);
         };
     };
+}
+
+/* Stops TX before the view is torn down, as GPS Sim's on_hide() does. Without
+ * it the destructor runs while replay_thread is still alive -- members are
+ * destroyed after the body -- so transmitter_model.disable() and
+ * baseband::shutdown() halt the M4 first, leaving the replay thread parked in
+ * BufferExchange::get() waiting on an event that can no longer arrive.
+ * chThdTerminate only sets a flag and does not wake a suspended thread, so
+ * ~ReplayThread's chThdWait() would never return. It also matters for every
+ * other push: opening the file picker or the frequency keypad hides this view,
+ * and TX must not keep running on a file that is about to be replaced. */
+void MultiGnssSimView::on_hide() {
+    if (is_active())
+        stop(false);
+    View::on_hide();
 }
 
 MultiGnssSimView::~MultiGnssSimView() {

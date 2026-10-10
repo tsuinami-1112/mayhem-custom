@@ -55,6 +55,7 @@ class MultiGnssSimView : public View {
     MultiGnssSimView(NavigationView& nav);
     ~MultiGnssSimView();
 
+    void on_hide() override;
     void focus() override;
 
     std::string title() const override { return "Multi-GNSS Sim"; };
@@ -74,8 +75,8 @@ class MultiGnssSimView : public View {
 
     void on_file_changed(const std::filesystem::path& new_file_path);
     void read_sim_metadata(const std::filesystem::path& metadata_path);
-    void on_stats(uint32_t bytes_read, uint32_t underruns);
-    void update_time(uint32_t bytes_read);
+    void on_stats(uint64_t bytes_read, uint32_t underruns);
+    void update_time(uint64_t bytes_read);
     uint64_t samples_from_bytes(uint64_t bytes) const;
 
     void toggle();
@@ -98,9 +99,10 @@ class MultiGnssSimView : public View {
     uint32_t start_seconds{0};
     bool have_start_time{false};
     uint32_t sample_rate{2600000};
-    /* The stats message lands 50 times a second; the clock only needs redrawing
-     * when its seconds digit moves. */
+    /* The stats messages land 50 times a second, so each row is only redrawn
+     * when the value it shows has actually changed. */
     uint32_t shown_second{UINT32_MAX};
+    uint32_t shown_underruns{UINT32_MAX};
 
     Button button_open{
         {UI_POS_X(0), UI_POS_Y(0), 10 * 8, 2 * 16},

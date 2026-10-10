@@ -966,18 +966,23 @@ class TXProgressMessage : public Message {
     bool done = false;
 };
 
-/* Multi-GNSS Sim: which sample format proc_mgnss_sim should unpack. The sample
- * rate still travels in SampleRateConfigMessage; this only selects the packing.
- * Values must match Format in tools/gnss_sim/FORMAT.md and the `format=` key of
- * the metadata sidecar. */
+/* Multi-GNSS Sim: which sample format proc_mgnss_sim should unpack, and the rate
+ * the file plays at. The rate is carried here rather than left to
+ * SampleRateConfigMessage because nothing in the TX replay path sends that one --
+ * transmitter_model.enable() reaches radio::set_baseband_rate(), which only
+ * programs the clock manager -- so the M4 would never learn the file's rate.
+ * Format values must match Format in tools/gnss_sim/FORMAT.md and the `format=`
+ * key of the metadata sidecar. */
 class GNSSSimConfigMessage : public Message {
    public:
-    constexpr GNSSSimConfigMessage(uint8_t format)
+    constexpr GNSSSimConfigMessage(uint8_t format, uint32_t sample_rate)
         : Message{ID::GNSSSimConfig},
-          format{format} {
+          format{format},
+          sample_rate{sample_rate} {
     }
 
     uint8_t format = 0;  // 0 = C8, 1 = C2, 2 = C1
+    uint32_t sample_rate = 0;
 };
 
 /* Multi-GNSS Sim: replay progress plus the number of blocks the SD card failed to
@@ -989,7 +994,9 @@ class GNSSSimStatsMessage : public Message {
         : Message{ID::GNSSSimStats} {
     }
 
-    uint32_t bytes_read = 0;
+    /* 64-bit because exFAT allows a file past 4 GiB, which the app's progress
+     * and clock derive from. */
+    uint64_t bytes_read = 0;
     uint32_t underruns = 0;
 };
 

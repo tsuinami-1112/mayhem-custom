@@ -102,12 +102,33 @@ carrier rather than a phase discontinuity, which a tracking loop recovers from m
 cleanly, and the counter means a lost lock on the bench is explained instead of
 guessed at.
 
+A short read means the FIFO ran dry and nothing else. It is **not** how the end of
+the file arrives: `ReplayThread` calls `set_size(buffer->capacity())` after a
+partial read (`replay_thread.cpp`), so the last block of every pass reaches the M4
+marked full, with up to 16383 bytes of whatever the buffer held earlier in the
+pass. That tail is transmitted as stale samples, and the buffers still in flight
+when `read()` hits zero are discarded, so each pass is also truncated by up to
+~48 KiB. Fixing either would mean changing `ReplayThread`, which Replay, Playlist,
+Recon and soundboard all share; at 2.6 MS/s the tail is about 6 ms, against a loop
+wrap that already steps GPS time backwards and forces a re-acquisition, so it is
+documented rather than chased.
+
 ## Centre frequency
 
 | Constellations | Centre | Why |
 |---|---|---|
 | Without BeiDou B1I | 1,575,420,000 | GPS/QZSS L1 C/A, Galileo E1 and BeiDou B1C all sit here |
 | With BeiDou B1I | 1,568,259,000 | Midway between B1I (1,561,098,000) and L1; needs the 20 MHz span, so `.C1` only |
+
+Two gaps to close before a wide-mode file is worth generating. The app's
+`TxRadioState` still carries GPS Sim's 15 MHz baseband bandwidth, so the
++/-7.161 MHz component offsets would sit on the TX filter skirt and the retention
+figures below would not be what the radio delivers; `max283x::filter::bandwidths`
+does offer 20 MHz, so this is a value to set from the sample rate, not a hardware
+limit. And the file picker filters on `.C8` alone, so a `.C2` or `.C1` file cannot
+be selected on the device yet -- the app cross-checks `format=` against the
+extension and refuses a mismatch, which is what stops a `.C8` file with
+`format=c1` from quietly transmitting noise.
 
 In wide mode each component is frequency-shifted by the generator: L1 signals to
 `+7.161 MHz`, B1I to `-7.161 MHz`. In-band power retained:
@@ -200,9 +221,18 @@ either.
 
 Two new IDs, appended before `MAX` (so existing IDs keep their values):
 
-* `GNSSSimConfig = 119`, app to M4: which sample format to unpack. Sample rate
-  keeps using the existing `SampleRateConfigMessage`.
-* `GNSSSimStats = 120`, M4 to app: bytes consumed and the underrun count.
-  `TXProgressMessage` carries only `progress` and `done` with no spare field, and
-  widening a message every TX app receives to serve one app would be the wrong
-  trade.
+* `GNSSSimConfig = 119`, app to M4: the sample format to unpack **and the sample
+  rate**. The rate is carried here rather than left to `SampleRateConfigMessage`
+  because nothing in the TX replay path sends that one -- `transmitter_model`
+  reaches `radio::set_baseband_rate()`, which only programs the clock manager and
+  carries a `// TODO: actually set baseband too?` -- so the M4 would never learn
+  the file's rate and its report interval would stay at the value it was
+  constructed with.
+* `GNSSSimStats = 120`, M4 to app: bytes consumed (64-bit, since exFAT allows a
+  file past 4 GiB) and the underrun count. `TXProgressMessage` carries only
+  `progress` and `done` with no spare field, and widening a message every TX app
+  receives to serve one app would be the wrong trade.
+
+The report is paced off the block count, not the samples actually produced: a
+total stall produces none, and that is exactly when the underrun count needs to
+reach the UI.

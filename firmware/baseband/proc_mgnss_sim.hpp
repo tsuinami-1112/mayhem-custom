@@ -60,12 +60,16 @@ class MultiGNSSSimProcessor : public BasebandProcessor {
 
     size_t baseband_fs = 3072000;
     static constexpr auto spectrum_rate_hz = 50.0f;
+    /* Non-zero so a missing config message cannot leave the gate in execute()
+     * permanently open, which would push a stats message on every block. */
+    size_t spectrum_interval_samples = 3072000 / 50;
 
     Format format{Format::C8};
 
-    /* Byte -> samples tables, filled by build_tables() at construction. They live
-     * in .bss rather than the image because an external app's code and its
-     * baseband image share the 40 KiB m4_code region on the LPC4320. */
+    /* Byte -> samples tables, filled by build_tables() at construction. The
+     * processor is heap-allocated by main(), so these sit in M4 RAM and not in
+     * the image, which matters because an external app's code and its baseband
+     * image share the 40 KiB m4_code region on the LPC4320. */
     std::array<complex8_t, 256 * 4> table_c1{};
     std::array<complex8_t, 256 * 2> table_c2{};
 
@@ -74,14 +78,14 @@ class MultiGNSSSimProcessor : public BasebandProcessor {
     std::unique_ptr<StreamOutput> stream{};
 
     SpectrumCollector channel_spectrum{};
-    size_t spectrum_interval_samples = 0;
     size_t spectrum_samples = 0;
 
     bool configured{false};
-    uint32_t bytes_read{0};
+    uint64_t bytes_read{0};
     uint32_t underruns{0};
 
     void build_tables();
+    void set_report_rate(uint32_t sample_rate);
     size_t bytes_for(size_t samples) const;
     size_t unpack(const uint8_t* src, size_t bytes, complex8_t* dst, size_t max_samples) const;
 

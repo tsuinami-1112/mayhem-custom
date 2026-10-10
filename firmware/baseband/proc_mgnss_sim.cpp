@@ -112,18 +112,26 @@ size_t MultiGNSSSimProcessor::unpack(const uint8_t* src, size_t bytes, complex8_
 void MultiGNSSSimProcessor::execute(const buffer_c8_t& buffer) {
     if (!configured || !stream) return;
 
-    const size_t wanted = bytes_for(buffer.count);
+    /* Clamped rather than asserted: read_buffer is sized for the 2048-sample
+     * block the DMA hands out today (transfer_samples in baseband_dma.cpp, which
+     * is not visible from here), and a larger block should degrade into zero fill
+     * rather than overrun. */
+    size_t wanted = bytes_for(buffer.count);
+    if (wanted > read_buffer.size())
+        wanted = read_buffer.size();
+
     const size_t got = stream->read(read_buffer.data(), wanted);
     bytes_read += got;
 
     const size_t filled = unpack(read_buffer.data(), got, buffer.p, buffer.count);
 
-    /* A short read means the SD card did not keep up, or the file ended. Zero the
-     * rest of the OUTPUT buffer, never the input bytes: in a packed format a zero
-     * byte decodes to the lowest level on both axes, so zero-filling the input
-     * would transmit a full-amplitude DC tone instead of silence. A gap in carrier
-     * is also easier for a tracking loop to ride out than stale samples, which is
-     * what GPS Sim leaves behind here. */
+    /* A short read means the FIFO ran dry, and nothing else: ReplayThread calls
+     * set_size(capacity()) after a partial read, so the file's own tail never
+     * reaches us as a short read. Zero the rest of the OUTPUT buffer, never the
+     * input bytes: in a packed format a zero byte decodes to the lowest level on
+     * both axes, so zero-filling the input would transmit a full-amplitude DC
+     * tone instead of silence. A gap in carrier is also easier for a tracking
+     * loop to ride out than the stale samples GPS Sim leaves here. */
     if (filled < buffer.count) {
         /* Assigned rather than memset: complex8_t is a std::complex specialisation,
          * so clearing it bytewise trips -Wclass-memaccess. */
@@ -133,7 +141,10 @@ void MultiGNSSSimProcessor::execute(const buffer_c8_t& buffer) {
             underruns++;
     }
 
-    spectrum_samples += filled;
+    /* Counted on the block, not on samples produced: a total stall produces no
+     * samples at all, and that is precisely when the underrun count needs to
+     * reach the UI. */
+    spectrum_samples += buffer.count;
     if (spectrum_samples >= spectrum_interval_samples) {
         spectrum_samples -= spectrum_interval_samples;
 
@@ -154,10 +165,12 @@ void MultiGNSSSimProcessor::on_message(const Message* const message) {
             sample_rate_config(*reinterpret_cast<const SampleRateConfigMessage*>(message));
             break;
 
-        case Message::ID::GNSSSimConfig:
-            format = static_cast<Format>(
-                reinterpret_cast<const GNSSSimConfigMessage*>(message)->format);
-            break;
+        case Message::ID::GNSSSimConfig: {
+            const auto config = reinterpret_cast<const GNSSSimConfigMessage*>(message);
+            format = static_cast<Format>(config->format);
+            if (config->sample_rate)
+                set_report_rate(config->sample_rate);
+        } break;
 
         case Message::ID::ReplayConfig:
             configured = false;
@@ -176,10 +189,14 @@ void MultiGNSSSimProcessor::on_message(const Message* const message) {
     }
 }
 
-void MultiGNSSSimProcessor::sample_rate_config(const SampleRateConfigMessage& message) {
-    baseband_fs = message.sample_rate;
+void MultiGNSSSimProcessor::set_report_rate(uint32_t sample_rate) {
+    baseband_fs = sample_rate;
     baseband_thread.set_sampling_rate(baseband_fs);
     spectrum_interval_samples = baseband_fs / spectrum_rate_hz;
+}
+
+void MultiGNSSSimProcessor::sample_rate_config(const SampleRateConfigMessage& message) {
+    set_report_rate(message.sample_rate);
 }
 
 void MultiGNSSSimProcessor::replay_config(const ReplayConfigMessage& message) {
