@@ -192,7 +192,9 @@ serve the old app and the new one.
 * `start_time`: UTC, the instant the first sample represents. The app adds elapsed
   playback to it and displays the result, so you can see at a glance the time your
   receiver ought to be reporting. **Baked in at generation**, and it steps back at
-  every loop.
+  every loop. Note the generators treat their `-t` argument as GPS time and encode
+  an 18 s leap-second count in the navigation message, so a receiver displays
+  `-t` minus 18 s; both generators write that corrected value here.
 * `cn0`: dB-Hz, or `0` when no noise was added.
 
 ## File naming

@@ -359,12 +359,17 @@ def mix(streams, out_path, fmt, cn0, seed=1):
 
 def write_sidecar(path, fmt, gnss, args, cn0):
     """CRLF, as the firmware's own write_metadata_file() emits."""
+    # start_time is the UTC the receiver will display. Both generators treat -t as
+    # GPS time and the nav message carries an 18 s leap-second count, so the
+    # receiver reads 18 s earlier than the scenario time.
+    import datetime
+    t = datetime.datetime.strptime(args.date, "%Y/%m/%d,%H:%M:%S") - datetime.timedelta(seconds=18)
     lines = [
         f"center_frequency={L1}",
         f"sample_rate={SAMPLE_RATE}",
         f"format={fmt}",
         f"gnss={','.join(gnss)}",
-        f"start_time={args.date}",
+        f"start_time={t.strftime('%Y/%m/%d,%H:%M:%S')}",
         f"latitude={args.lat}",
         f"longitude={args.lon}",
         f"altitude={args.alt}",

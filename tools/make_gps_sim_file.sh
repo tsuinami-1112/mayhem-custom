@@ -223,11 +223,24 @@ ARGS=( -e "$EPH_ARG" -l "$LAT,$LON,$ALT" -b 8 -s "$SAMPLE_RATE"
 # read_metadata_file() needs center_frequency and sample_rate or it rejects the
 # file and the app silently falls back to its built-in defaults. CRLF matches
 # what the firmware's own write_metadata_file() emits.
+# start_time is the UTC a receiver will display for the first sample. gps-sdr-sim
+# treats -t as GPS time and encodes an 18 s leap-second count in the nav message,
+# so the receiver shows 18 s less than the scenario time. Done as epoch arithmetic:
+# "<date> -18 seconds" is ambiguous to GNU date, which reads -18 as a UTC-18 zone
+# and a bare "seconds" as +1 s. Falls back to the uncorrected value without GNU date.
+START_UTC="$START_DATE"
+if EPOCH="$(date -u -d "$(printf '%s' "$START_DATE" | tr ',' ' ' | tr '/' '-')" +%s 2>/dev/null)"; then
+    START_UTC="$(date -u -d "@$((EPOCH - 18))" +%Y/%m/%d,%H:%M:%S)"
+fi
 {
     printf 'center_frequency=%s\r\n' "$CENTER_FREQ"
     printf 'sample_rate=%s\r\n'      "$SAMPLE_RATE"
+    printf 'format=c8\r\n'
+    printf 'gnss=GPS\r\n'
+    printf 'start_time=%s\r\n'       "$START_UTC"
     printf 'latitude=%s\r\n'         "$LAT"
     printf 'longitude=%s\r\n'        "$LON"
+    printf 'altitude=%s\r\n'         "$ALT"
 } > "$META"
 
 echo ">> wrote $OUT"
