@@ -44,6 +44,9 @@ set(EXTCPPSRC
 	#gpssim  160 byte
 	external/gpssim/main.cpp
 	external/gpssim/gps_sim_app.cpp
+	#mgnss_sim
+	external/mgnss_sim/main.cpp
+	external/mgnss_sim/mgnss_sim_app.cpp
 
 	#spainter   464 byte
 	external/spainter/main.cpp
@@ -430,6 +433,7 @@ set(EXTAPPLIST
 	lcr
 	jammer
 	gpssim
+	mgnss_sim
 	spainter
 	keyfob
 	tetris
