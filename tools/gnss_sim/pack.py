@@ -23,24 +23,34 @@ def _quantise(x, thresholds):
     return np.digitize(x, thresholds).astype(np.uint8)
 
 
-def pack_c8(iq):
-    """Complex array -> signed 8-bit interleaved I,Q (two bytes per sample)."""
-    scale = 32.0 / max(np.sqrt(np.mean(np.abs(iq) ** 2)), 1e-12)
+def pack_c8(iq, scale=None):
+    """Complex array -> signed 8-bit interleaved I,Q (two bytes per sample).
+
+    `scale` multiplies before rounding. Pass it when packing a long file in
+    chunks: deriving it from each chunk separately would let the quantiser drift
+    with the signal, so the caller computes one value for the whole file.
+    """
+    if scale is None:
+        scale = 32.0 / max(np.sqrt(np.mean(np.abs(iq) ** 2)), 1e-12)
     out = np.empty(iq.size * 2, dtype=np.int8)
     out[0::2] = np.clip(np.rint(iq.real * scale), -127, 127)
     out[1::2] = np.clip(np.rint(iq.imag * scale), -127, 127)
     return out.tobytes()
 
 
-def pack_c2(iq):
+def pack_c2(iq, sigma=None):
     """Complex array -> 2-bit I and Q, two complex samples per byte.
 
     bit    7 6   5 4   3 2   1 0
          [ Q1 ] [ I1 ] [ Q0 ] [ I0 ]
+
+    `sigma` sets the quantiser thresholds at +/-sigma. Pass it when chunking, for
+    the same reason as pack_c8's `scale`.
     """
     if iq.size % 2:
         raise ValueError("c2 needs an even sample count")
-    sigma = max(np.sqrt(np.mean(np.concatenate([iq.real, iq.imag]) ** 2)), 1e-12)
+    if sigma is None:
+        sigma = max(np.sqrt(np.mean(np.concatenate([iq.real, iq.imag]) ** 2)), 1e-12)
     thr = [-sigma, 0.0, sigma]
     ci, cq = _quantise(iq.real, thr), _quantise(iq.imag, thr)
     out = (
