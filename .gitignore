@@ -84,3 +84,11 @@ venv/
 # TODO: generate bitmap during build, since we use python during build anyway, lemme know if this is a bad idea @zxkmm
 /firmware/tools/bitmap.hpp
 tmp/*
+
+# Generated GNSS baseband files. Both generators default -o to sdcard/GPS/, and
+# these run to gigabytes -- a forgotten -o would otherwise leave one sitting
+# untracked in the checkout, and GitHub refuses anything over 100 MB anyway. The
+# .TXT sidecars stay tracked: they are tiny and HKIA.TXT ships with the repo.
+sdcard/GPS/*.C8
+sdcard/GPS/*.C2
+sdcard/GPS/*.C1
