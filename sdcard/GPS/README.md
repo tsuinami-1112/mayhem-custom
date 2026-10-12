@@ -22,12 +22,20 @@ back to its built-in defaults, so always ship the pair together.
 ```
 center_frequency=1575420000
 sample_rate=2600000
+format=c8
+gnss=GPS
+start_time=2026/10/12,09:59:42
 latitude=22.308889
 longitude=113.914444
+altitude=11.0
 ```
 
-Only `center_frequency` and `sample_rate` are read by the app; `latitude` and
-`longitude` are there to document what the file simulates.
+GPS Sim TX reads only `center_frequency` and `sample_rate` and ignores the rest.
+Multi-GNSS Sim also shows `format`, `gnss` and `start_time` on its screen and
+cross-checks `format` against the file extension. `start_time` is the UTC a receiver
+will display for the first sample (the scenario time minus the 18 leap seconds the
+nav message carries). `latitude`, `longitude` and `altitude` document what the file
+simulates.
 
 ## Included
 
@@ -36,7 +44,7 @@ reference point 22°18′32″N 113°54′52″E. The matching `HKIA.C8` is ~1.5
 5 minutes, so it is not kept in the repository. Generate it with:
 
 ```sh
-./tools/make_gps_sim_file.sh -o /path/to/sdcard/GPS/HKIA.C8
+./tools/make_gps_sim_file.sh --fetch -o /path/to/sdcard/GPS/HKIA.C8
 ```
 
 That script rewrites `HKIA.TXT` as well, so the pair always stays consistent. Run
@@ -70,6 +78,10 @@ and picks the newest one, or clamps an explicit `-t` into range and says so.
 
 ## Notes
 
+* If a replay stops with `File read error.` and the app tiles then show `ExtAppErr`
+  until a reboot, the card is being driven at the default 25 MHz SDIO clock and is
+  not keeping up with the sustained 5.2 MB/s read. **Settings → SD card → enable
+  high speed IO** (50 MHz) fixed this on the bench; it is a one-time setting.
 * Size is `duration × 5.2 MB/s`. FAT32 caps a single file at 4 GiB (≈826 s); the
   firmware also supports exFAT if you need longer.
 * The app loops the file when **Loop** is ticked, but a loop steps GPS time

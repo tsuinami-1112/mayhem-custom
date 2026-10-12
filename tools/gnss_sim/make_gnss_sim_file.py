@@ -75,29 +75,83 @@ def ensure_gps(tools):
     return binary
 
 
-def ensure_galileo(tools):
-    """harshadms/galileo-sdr-sim, with two changes applied on first build.
+# Pinned: upstream moves (its 2026-10-06 commit changed the E1 composite sign, the
+# carrier start and the I/NAV words), and every change here was verified against
+# exactly this revision.
+GAL_COMMIT = "bdccd7f67d98d206f07aecc728fc80d28ad73d47"
 
-    Its sample rate is a compile-time constant, 2.484 MS/s, which has to become
-    2.6 MS/s to mix with GPS. The constant only feeds `delt = 1/TX_SAMPLERATE`
-    and the phase accumulators, so retuning it is safe.
+# set_scenario_start_time() in src/gnss-time.cpp, as upstream has it. eph1 is
+# `vector<ephem_t> eph1[MAX_SAT]`, one vector per satellite, but the loop indexes
+# it [set][satellite]: it reads past the end of every vector and never shifts the
+# real records, so -T to a date far from the file's own leaves zero satellites
+# visible and the generator exits 0 with a file of pure noise.
+GAL_RETIME_BROKEN = """            for (int sv = 0; sv < MAX_SAT; sv++)
+            {
+                for (int i = 0; i < neph; i++)
+                {
+                    if (eph1[i][sv].vflg == 1)
+                    {
+                        gtmp = incGalTime(eph1[i][sv].toc, dsec);
+                        gal2date(&gtmp, &ttmp);
+                        eph1[i][sv].toc = gtmp;
+                        eph1[i][sv].t = ttmp;
 
-    It also includes <uhd/usrp/multi_usrp.hpp> from structures.h for two types it
-    parks in a struct, even on the file-sink path, which would otherwise make
-    libuhd-dev a build dependency for a program that never touches a USRP. A
-    small stand-in header supplies those types, usrp.cpp is left out and
-    init_usrp() is stubbed. Output of the two builds was compared byte-for-byte
-    and is identical.
-    """
-    binary = tools / "galileo-build" / "galileo-sdr-sim"
-    if binary.exists():
-        return binary
+                        gtmp = incGalTime(eph1[i][sv].toe, dsec);
+                        eph1[i][sv].toe = gtmp;
+                    }
+                }
+            }
+"""
+GAL_RETIME_FIXED = """            // Patched by make_gnss_sim_file.py: eph1 is one vector per satellite.
+            for (int sv = 0; sv < MAX_SAT; sv++)
+            {
+                for (ephem_t &e : eph1[sv])
+                {
+                    if (e.vflg == 1)
+                    {
+                        gtmp = incGalTime(e.toc, dsec);
+                        gal2date(&gtmp, &ttmp);
+                        e.toc = gtmp;
+                        e.t = ttmp;
 
-    src = tools / "galileo-sdr-sim"
-    if not (src / ".git").exists():
-        log(f"cloning galileo-sdr-sim into {src}")
-        run(["git", "clone", "--depth", "1", GAL_REPO, str(src)])
+                        gtmp = incGalTime(e.toe, dsec);
+                        e.toe = gtmp;
+                    }
+                }
+            }
+"""
 
+# incGalTime() in the same file never carries seconds over into the week, so a
+# -T shift of years leaves toe.sec at ~1e8 with the old week. subGalTime() still
+# gets the difference right, but satpos() works from toe.sec alone (tk = t -
+# toe.sec, with one +-604800 wrap), so every satellite is propagated years off
+# its orbit and none is above the horizon. gps-sdr-sim's incGPSTime() normalises.
+GAL_INC_BROKEN = """galtime_t incGalTime(galtime_t g, double dt)
+{
+    g.sec = g.sec + dt;
+    return g;
+}
+"""
+GAL_INC_FIXED = """galtime_t incGalTime(galtime_t g, double dt)
+{
+    // Patched by make_gnss_sim_file.py: carry whole weeks, as gps-sdr-sim does.
+    g.sec = g.sec + dt;
+    double weeks = floor(g.sec / SECONDS_IN_WEEK);
+    g.week += (int)weeks;
+    g.sec -= weeks * SECONDS_IN_WEEK;
+    return g;
+}
+"""
+
+
+def patch_galileo_source(src):
+    """Apply the source changes galileo-sdr-sim needs here. Returns True if any
+    file changed, so a stale binary can be rebuilt."""
+    changed = False
+
+    # Its sample rate is a compile-time constant, 2.484 MS/s, which has to become
+    # 2.6 MS/s to mix with GPS. The constant only feeds `delt = 1/TX_SAMPLERATE`
+    # and the phase accumulators, so retuning it is safe.
     constants = src / "include" / "constants.h"
     text = constants.read_text()
     patched = text.replace("#define TX_SAMPLERATE 2484000.0",
@@ -107,6 +161,65 @@ def ensure_galileo(tools):
     if patched != text:
         constants.write_text(patched)
         log(f"retuned galileo-sdr-sim to {SAMPLE_RATE} Sa/s")
+        changed = True
+    if "2484000" in patched:
+        sys.exit(f"error: {constants} still carries the 2.484 MS/s rate somewhere new")
+
+    # The two -T retiming fixes described at GAL_RETIME_BROKEN and GAL_INC_BROKEN.
+    timing = src / "src" / "gnss-time.cpp"
+    text = timing.read_text()
+    for broken, fixed, what in ((GAL_RETIME_BROKEN, GAL_RETIME_FIXED, "ephemeris retiming"),
+                                (GAL_INC_BROKEN, GAL_INC_FIXED, "week carry")):
+        if broken in text:
+            text = text.replace(broken, fixed)
+            log(f"patched galileo-sdr-sim {what}")
+            changed = True
+        elif fixed not in text:
+            sys.exit(f"error: {timing} does not look like galileo-sdr-sim {GAL_COMMIT[:7]}; "
+                     f"the {what} patch does not apply")
+    if changed:
+        timing.write_text(text)
+    return changed
+
+
+def ensure_galileo(tools):
+    """harshadms/galileo-sdr-sim at GAL_COMMIT, with three changes applied on
+    first build: the sample rate and the -T fix (patch_galileo_source), and no
+    UHD dependency.
+
+    It includes <uhd/usrp/multi_usrp.hpp> from structures.h for two types it
+    parks in a struct, even on the file-sink path, which would otherwise make
+    libuhd-dev a build dependency for a program that never touches a USRP. A
+    small stand-in header supplies those types, usrp.cpp is left out and
+    init_usrp() is stubbed. Output of the two builds was compared byte-for-byte
+    and is identical.
+    """
+    binary = tools / "galileo-build" / "galileo-sdr-sim"
+    src = tools / "galileo-sdr-sim"
+
+    if not (src / ".git").exists():
+        log(f"cloning galileo-sdr-sim {GAL_COMMIT[:7]} into {src}")
+        src.mkdir(parents=True, exist_ok=True)
+        run(["git", "init", "-q", str(src)])
+        run(["git", "-C", str(src), "remote", "add", "origin", GAL_REPO])
+    head = subprocess.run(["git", "-C", str(src), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        head = ""  # a repository with no commits yet echoes "HEAD"
+    if head != GAL_COMMIT:
+        if head:
+            log(f"moving galileo-sdr-sim from {head[:7]} to {GAL_COMMIT[:7]}")
+            run(["git", "-C", str(src), "checkout", "-q", "--", "."])
+        run(["git", "-C", str(src), "fetch", "-q", "--depth", "1", "origin", GAL_COMMIT])
+        run(["git", "-C", str(src), "-c", "advice.detachedHead=false",
+             "checkout", "-q", "FETCH_HEAD"])
+        binary.unlink(missing_ok=True)
+
+    if patch_galileo_source(src) and binary.exists():
+        log("galileo-sdr-sim source changed; rebuilding")
+        binary.unlink()
+    if binary.exists():
+        return binary
 
     build = tools / "galileo-build"
     build.mkdir(parents=True, exist_ok=True)
@@ -197,6 +310,48 @@ def rinex_epochs(path):
     return sorted(out)
 
 
+# Where a retimed scenario is anchored in the bundled Galileo sample. -T maps the
+# scenario start onto the file's first record. The sample is one station's log
+# (sbf2rin), so at its start it only holds records for the few satellites that
+# station was tracking then, and a retimed scenario sees 1 satellite from Hong
+# Kong; by 16:00 the file covers the constellation and the same scenario sees 7.
+# Records before this epoch are dropped so the anchor lands there.
+GAL_SAMPLE_ANCHOR = (2022, 2, 20, 16, 0)
+
+
+def trimmed_gal_sample(tools):
+    """The bundled 20feb2022.rnx without the records before GAL_SAMPLE_ANCHOR."""
+    src = tools / "galileo-sdr-sim" / "rinex_files" / "20feb2022.rnx"
+    out = CACHE / "gal_sample_from_1600.rnx"
+    if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
+        return out
+    lines = src.read_text().splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if "END OF HEADER" in line:
+            header, body = lines[:i + 1], lines[i + 1:]
+            break
+    else:
+        sys.exit(f"error: {src} has no END OF HEADER")
+    records, kept = [], 0
+    for line in body:
+        m = re.match(r"^E\d\d (\d{4}) (\d\d) (\d\d) (\d\d) (\d\d)", line)
+        if m:
+            records.append([line, tuple(int(x) for x in m.groups()) >= GAL_SAMPLE_ANCHOR])
+        elif records:
+            records[-1][0] += line
+    with out.open("w") as f:
+        f.writelines(header)
+        for text, keep in records:
+            if keep:
+                f.write(text)
+                kept += 1
+    if not kept:
+        sys.exit(f"error: no records at or after {GAL_SAMPLE_ANCHOR} in {src}")
+    log(f"galileo sample: {kept} of {len(records)} records kept, from "
+        f"{'/'.join(f'{v:02d}' for v in GAL_SAMPLE_ANCHOR[:3])},{GAL_SAMPLE_ANCHOR[3]:02d}:{GAL_SAMPLE_ANCHOR[4]:02d}")
+    return out
+
+
 def fetch_gps_ephemeris(want_day, lookback=7):
     """Daily merged broadcast ephemeris from NOAA CORS (open, no login).
 
@@ -230,7 +385,7 @@ def fetch_gps_ephemeris(want_day, lookback=7):
 # Running a generator
 # --------------------------------------------------------------------------
 
-def run_generator(name, binary, ephemeris, work, args):
+def run_generator(name, binary, ephemeris, work, args, retime):
     """Run one generator inside `work` with bare filenames.
 
     Both generators strcpy their -e and -o arguments into fixed buffers --
@@ -248,7 +403,7 @@ def run_generator(name, binary, ephemeris, work, args):
     cmd = [f"./gen_{name}", "-e", eph_local, "-o", out_local,
            "-l", f"{args.lat},{args.lon},{args.alt}",
            "-d", str(args.duration), "-t", args.date]
-    if args.retime:
+    if retime:
         cmd += ["-T", args.date]
     if name == "gps":
         cmd += ["-b", "16", "-s", str(SAMPLE_RATE)]
@@ -427,7 +582,12 @@ def main():
 
     if not args.date:
         args.date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y/%m/%d,%H:%M:%S")
-    args.retime = True
+    # Retiming (-T) shifts an ephemeris file's epochs onto the scenario date so a
+    # stale sample still simulates a sky. It is decided per constellation: only an
+    # ephemeris known to cover the scenario date (a --fetch download) is used as
+    # is. The bundled Galileo sample is always retimed; a --fetch run must not
+    # switch that off, or galileo-sdr-sim rejects today's date against 2022 orbits.
+    retime = {g: True for g in gnss}
 
     tools = CACHE / "tools"
     tools.mkdir(parents=True, exist_ok=True)
@@ -442,21 +602,22 @@ def main():
         elif args.fetch:
             path, epochs = fetch_gps_ephemeris(args.date.split(",")[0])
             eph["gps"] = path
-            args.retime = False
+            retime["gps"] = False
             if epochs and args.date > epochs[-1]:
                 log(f"note: {args.date} is past this ephemeris ({epochs[-1]}); using that")
                 args.date = epochs[-1]
         else:
             eph["gps"] = tools / "gps-sdr-sim" / "brdc0010.22n"
     if "gal" in gnss:
-        eph["gal"] = (Path(args.gal_eph) if args.gal_eph
-                      else tools / "galileo-sdr-sim" / "rinex_files" / "20feb2022.rnx")
+        eph["gal"] = Path(args.gal_eph) if args.gal_eph else trimmed_gal_sample(tools)
 
     for g, path in eph.items():
         if not Path(path).exists():
             sys.exit(f"error: {g} ephemeris not found: {path}")
 
-    log(f"start time:  {args.date} UTC" + ("" if args.retime else "  (real orbits)"))
+    log(f"start time:  {args.date} UTC")
+    log("orbits:      " + ", ".join(
+        f"{NAMES[g]} {'real' if not retime[g] else 'sample, retimed'}" for g in gnss))
     log(f"position:    {args.lat}, {args.lon}, {args.alt} m")
     log(f"output:      {out}")
 
@@ -464,7 +625,7 @@ def main():
     try:
         streams = []
         for g in gnss:
-            path, sats = run_generator(g, binaries[g], eph[g], work, args)
+            path, sats = run_generator(g, binaries[g], eph[g], work, args, retime[g])
             streams.append({"name": g, "path": path, "sats": sats,
                             "power": stream_power(path)})
 
