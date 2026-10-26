@@ -174,6 +174,8 @@ class Message {
         RxFs4Config = 116,
         FT8Packet = 117,
         FT8RxStatus = 118,
+        GNSSSimConfig = 119,
+        GNSSSimStats = 120,
         MAX
     };
 
@@ -962,6 +964,40 @@ class TXProgressMessage : public Message {
 
     uint32_t progress = 0;
     bool done = false;
+};
+
+/* Multi-GNSS Sim: which sample format proc_mgnss_sim should unpack, and the rate
+ * the file plays at. The rate is carried here rather than left to
+ * SampleRateConfigMessage because nothing in the TX replay path sends that one --
+ * transmitter_model.enable() reaches radio::set_baseband_rate(), which only
+ * programs the clock manager -- so the M4 would never learn the file's rate.
+ * Format values must match Format in tools/gnss_sim/FORMAT.md and the `format=`
+ * key of the metadata sidecar. */
+class GNSSSimConfigMessage : public Message {
+   public:
+    constexpr GNSSSimConfigMessage(uint8_t format, uint32_t sample_rate)
+        : Message{ID::GNSSSimConfig},
+          format{format},
+          sample_rate{sample_rate} {
+    }
+
+    uint8_t format = 0;  // 0 = C8, 1 = C2, 2 = C1
+    uint32_t sample_rate = 0;
+};
+
+/* Multi-GNSS Sim: replay progress plus the number of blocks the SD card failed to
+ * supply in time. TXProgressMessage has no spare field, and widening a message
+ * every TX app receives to serve one app would be the wrong trade. */
+class GNSSSimStatsMessage : public Message {
+   public:
+    constexpr GNSSSimStatsMessage()
+        : Message{ID::GNSSSimStats} {
+    }
+
+    /* 64-bit because exFAT allows a file past 4 GiB, which the app's progress
+     * and clock derive from. */
+    uint64_t bytes_read = 0;
+    uint32_t underruns = 0;
 };
 
 class AFSKRxConfigureMessage : public Message {

@@ -1,0 +1,17 @@
+# Git for Windows defaults to core.autocrlf=true, which rewrites text files to
+# CRLF on checkout. A script whose shebang then ends "bash\r" fails with
+#
+#     env: $'bash\r': No such file or directory
+#
+# because the kernel looks for an interpreter by that literal name. 42 files in
+# this tree carry a shebang, among them mbt, dockerize.sh,
+# firmware/tools/docker-entrypoint.sh and the export_external_apps.py /
+# copy_external_apps.sh pair that the firmware build itself invokes, so a Windows
+# or WSL-on-/mnt/c checkout breaks the build and not just the tooling.
+*.sh text eol=lf
+*.py text eol=lf
+mbt  text eol=lf
+
+# Already committed with CRLF. Left unconverted so a checkout matches HEAD rather
+# than showing up as a local modification.
+.github/workflows/changelog.py -text

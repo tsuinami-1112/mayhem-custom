@@ -580,6 +580,13 @@ void set_sample_rate(uint32_t sample_rate, OversampleRate oversample_rate) {
     send_message(&message);
 }
 
+/* Multi-GNSS Sim: select which sample packing proc_mgnss_sim should unpack. The
+ * rate travels separately in set_sample_rate(); this only picks the format. */
+void set_gnss_sim_format(const uint8_t format, const uint32_t sample_rate) {
+    GNSSSimConfigMessage message{format, sample_rate};
+    send_message(&message);
+}
+
 void capture_start(CaptureConfig* const config) {
     CaptureConfigMessage message{config};
     send_message(&message);
