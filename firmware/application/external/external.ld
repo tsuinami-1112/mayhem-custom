@@ -121,6 +121,7 @@ MEMORY
     ram_external_app_aprs_tx               (rwx) : org = 0xAE100000, len = 32k
     ram_external_app_ft8_rx                (rwx) : org = 0xAE110000, len = 32k
     ram_external_app_mgnss_sim             (rwx) : org = 0xAE120000, len = 32k
+    ram_external_app_walkie_rx             (rwx) : org = 0xAE130000, len = 32k
 }
 
 SECTIONS
@@ -712,6 +713,12 @@ SECTIONS
         KEEP(*(.external_app.app_mgnss_sim.application_information));
         */external/mgnss_sim/*(*ui*external_app*mgnss_sim*);
     } > ram_external_app_mgnss_sim
+
+    .external_app_walkie_rx : ALIGN(4) SUBALIGN(4)
+    {
+        KEEP(*(.external_app.app_walkie_rx.application_information));
+        */external/walkie_rx/*(*ui*external_app*walkie_rx*);
+    } > ram_external_app_walkie_rx
 
 
 

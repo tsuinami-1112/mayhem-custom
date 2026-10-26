@@ -419,6 +419,10 @@ set(EXTCPPSRC
 	external/sdusb/main.cpp
 	external/sdusb/ui_sd_over_usb.cpp
 
+	#walkie rx
+	external/walkie_rx/main.cpp
+	external/walkie_rx/ui_walkie_rx.cpp
+
 )
 
 set(EXTAPPLIST
@@ -520,4 +524,5 @@ set(EXTAPPLIST
 	aprs_tx
 	ft8_rx
 	sdusb
+	walkie_rx
 )
